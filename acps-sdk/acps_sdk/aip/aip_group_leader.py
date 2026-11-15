@@ -1429,6 +1429,14 @@ class GroupLeaderSession:
         # Partner 最近一次邀请路由
         self.invitation_routes: Dict[str, str] = {}
 
+        # 收到群消息时要通知的监听者（add_message_listener）
+        self._message_listeners: List[
+            Callable[
+                [Union[TaskCommand, TaskResult, GroupMgmtCommand, GroupMgmtResult]],
+                None,
+            ]
+        ] = []
+
     def touch(self) -> None:
         """更新最后修改时间"""
         self.last_modified = datetime.now(timezone.utc)
@@ -1530,6 +1538,33 @@ class GroupLeaderSession:
         self.message_history.append(message)
         if len(self.message_history) > self.MAX_HISTORY:
             self.message_history = self.message_history[-self.MAX_HISTORY :]
+        for listener in list(self._message_listeners):
+            try:
+                listener(message)
+            except Exception:
+                logger.warning(
+                    "event=session_message_listener_failed session_id=%s",
+                    self.session_id,
+                    exc_info=True,
+                )
+
+    def add_message_listener(
+        self,
+        listener: Callable[
+            [Union[TaskCommand, TaskResult, GroupMgmtCommand, GroupMgmtResult]], None
+        ],
+    ) -> Callable[[], None]:
+        """订阅这个会话收到的每一条群消息（含 Leader 自己广播的回声），在消息记入历史之后同步调用。
+
+        监听者应当很快返回、不抛异常（抛了只记日志，不影响路由）。返回值是取消订阅的函数。
+        """
+        self._message_listeners.append(listener)
+
+        def remove() -> None:
+            if listener in self._message_listeners:
+                self._message_listeners.remove(listener)
+
+        return remove
 
 
 class GroupLeader:

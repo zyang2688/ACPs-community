@@ -183,6 +183,15 @@ from .aip_group_partner import (  # noqa: F401
     PartnerGroupState,
 )
 
+# 群组的「全体确认才生效」协调器（Leader 侧两阶段提交）
+from .aip_group_commit import (  # noqa: F401
+    CommitOutcome,
+    CommitParticipant,
+    GroupCommit,
+    ParticipantOutcome,
+    Vote,
+)
+
 # AIP 任务状态机（规范 §4.5 的转移表与命令有效性）
 from .aip_task_fsm import (  # noqa: F401
     COMMAND_VALID_IN,
