@@ -101,6 +101,11 @@ DATA_PLANE_TYPES = frozenset({"task-command", "task-result"})
 _active_cmd_trace: ContextVar[TraceContext | None] = ContextVar(
     "amp_group_partner_cmd_trace", default=None
 )
+# 当前任务是否在某个客户端自己的群消息消费回调里（值是那个客户端）。aiormq 为每条投递单独建任务，
+# 所以在回调开头设置即可，不会串到别的投递。
+_consuming_client: ContextVar[Optional["GroupPartnerMqClient"]] = ContextVar(
+    "aip_group_partner_consuming_client", default=None
+)
 
 
 class PartnerGroupState(str, Enum):
@@ -744,6 +749,7 @@ class GroupPartnerMqClient:
             raise RuntimeError("Queue not created yet")
 
         async def on_message(message: AbstractIncomingMessage) -> None:
+            _consuming_client.set(self)
             t0 = monotonic()
             recv_span: str | None = None
             trace_id: str | None = None
@@ -1325,7 +1331,36 @@ class GroupPartnerMqClient:
 
         主动退出时先广播 LEAVE_GROUP 命令，再发送 connected=false 状态，
         最后执行本地资源清理。
+
+        在本客户端的群消息回调（命令、结果、管理命令处理器）里调用时，退出在这条回调结束、消息确认之后
+        进行，本方法立即返回；退出完成时触发断开回调。
         """
+        if self._state == PartnerGroupState.DISCONNECTED:
+            return
+
+        callback_task = asyncio.current_task()
+        if _consuming_client.get() is self and callback_task is not None:
+            # 在本客户端自己的消费回调里被调用（业务代码收到某条群消息后直接退群）。退出要关本通道：
+            # 在回调里直接关，当前这条消息还没确认，aiormq 又会取消通道上的回调任务——也就是当前任务，
+            # 清理停在 LEAVING。与收到 DISBAND / LEAVE_GROUP 时一样，等这条回调结束（消息已确认）后在
+            # 独立任务里退出；这里立即返回，退出完成时照常触发断开回调，close() 也会等它。
+            leave_task = asyncio.get_running_loop().create_task(
+                self._leave_group_after(callback_task, session_id)
+            )
+            self._leave_tasks.add(leave_task)
+            leave_task.add_done_callback(self._leave_tasks.discard)
+            return
+
+        await self._leave_group_now(session_id)
+
+    async def _leave_group_after(
+        self, callback_task: "asyncio.Task[Any]", session_id: Optional[str]
+    ) -> None:
+        _consuming_client.set(None)
+        await asyncio.wait({callback_task})
+        await self._leave_group_now(session_id)
+
+    async def _leave_group_now(self, session_id: Optional[str]) -> None:
         if self._state == PartnerGroupState.DISCONNECTED:
             return
 

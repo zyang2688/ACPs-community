@@ -13,6 +13,7 @@ import json
 import pytest
 from aiormq.base import FutureStore
 
+from acps_sdk.aip.aip_base_model import TaskCommand, TaskCommandType
 from acps_sdk.aip.aip_group_model import GroupMgmtCommand, GroupMgmtCommandType
 from acps_sdk.aip.aip_group_partner import GroupPartnerMqClient, PartnerGroupState
 
@@ -117,3 +118,50 @@ async def test_leave_requested_by_leader_reaches_disconnected(command, mentions)
     assert channel.is_closed
     statuses = [m["status"]["connected"] for m in exchange.published if m.get("type") == "group-mgmt-result"]
     assert statuses == [False]
+
+
+@pytest.mark.asyncio
+async def test_leave_group_called_from_command_handler_reaches_disconnected() -> None:
+    """业务代码在群消息回调里直接调 leave_group()（例如收到「你这单完成了」就退群）。"""
+    client = GroupPartnerMqClient(partner_aic=PARTNER_AIC, identity_binding_enabled=False)
+    channel = _Channel()
+    queue = _Queue(channel)
+    exchange = _Exchange()
+    client._channel, client._queue, client._exchange = channel, queue, exchange
+    client._group_id = GROUP_ID
+    client._exchange_name = f"group_{LEADER_AIC}_{GROUP_ID}"
+    client._state = PartnerGroupState.JOINED
+    left: list[str] = []
+    client.set_disconnect_handler(lambda _client, group_id: left.append(group_id))
+
+    async def on_command(command, is_mentioned) -> None:
+        await client.leave_group(session_id=command.sessionId)
+
+    client.set_command_handler(on_command)
+    await client._start_consuming()
+
+    command = TaskCommand(
+        id="cmd-1",
+        sentAt="2026-01-01T00:00:00Z",
+        senderRole="leader",
+        senderId=LEADER_AIC,
+        command=TaskCommandType.Complete,
+        taskId="task-1",
+        sessionId="session-1",
+        groupId=GROUP_ID,
+        mentions=[PARTNER_AIC],
+    )
+    consumer_task = queue.deliver(_Message(command.model_dump(exclude_none=True)))
+    with contextlib.suppress(BaseException):
+        await asyncio.wait_for(asyncio.shield(consumer_task.task), 2)
+    for _ in range(50):
+        if client.state == PartnerGroupState.DISCONNECTED:
+            break
+        await asyncio.sleep(0.01)
+
+    assert client.state == PartnerGroupState.DISCONNECTED
+    assert left == [GROUP_ID]
+    assert channel.is_closed
+    published = [(m.get("type"), m.get("command") or m.get("status", {}).get("connected")) for m in exchange.published]
+    assert published == [("group-mgmt-command", "leave-group"), ("group-mgmt-result", False)]
+    await client.close()
