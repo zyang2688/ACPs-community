@@ -182,3 +182,15 @@ from .aip_group_partner import (  # noqa: F401
     PartnerGroupSession,
     PartnerGroupState,
 )
+
+# AIP 任务状态机（规范 §4.5 的转移表与命令有效性）
+from .aip_task_fsm import (  # noqa: F401
+    COMMAND_VALID_IN,
+    FINAL_STATES,
+    NEXT_STATES,
+    TaskTransitionError,
+    can_transition,
+    check_transition,
+    command_is_valid,
+    is_final,
+)
